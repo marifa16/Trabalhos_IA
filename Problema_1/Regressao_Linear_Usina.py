@@ -183,8 +183,6 @@ print(f" NRMSE no teste = {100*nrmse_teste/amplitude:.2f}% da amplitude")
 print(f" MAE no teste = {100*mae_teste/amplitude:.2f}% da amplitude")
 print(f" MAE no teste = {100*mae_teste/amplitude:.2f}% da media de PE")
 
-from sklearn.pipeline import make_pipeline
-
 pipe = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), LinearRegression())
 r2_cv = cross_val_score(pipe, X, Y, cv=5, scoring="r2")
 print(f"\nValidação cruzada - R²: " f"{r2_cv.mean():.4f}+-{r2_cv.std():.4f}")
@@ -192,3 +190,34 @@ print(f"\nValidação cruzada - R²: " f"{r2_cv.mean():.4f}+-{r2_cv.std():.4f}")
 #Diagnostico de sobreajuste 
 
 print(f"\nDiferença de R²: {r2_treino - r2_teste:+4f}" f" -> {'sem sinal de overfitting' if abs(r2_treino - r2_teste)<0.02 else 'possível overfitting'}")
+
+#Gráfico de diagnóstico do modelo
+
+residuos_treino = Y_treino - pred_treino 
+
+fig, eixo = plt.subplots(1, 3, figsize=(16, 4.5))
+
+eixo[0].scatter(Y_teste, pred_teste, s=8, alpha=0.4) 
+limite = [Y.min(),Y.max()]
+eixo[0].plot(limite, limite, "r--", label="Previsão perfeita!")
+eixo[0].set_xlabel("PE real (MW)")
+eixo[0].set_ylabel("PE previsto (MW)")
+eixo[0].set_title("Previsão vs Real - Teste -> R² = {r2_teste:.3f}")
+eixo[0].legend()
+
+eixo[1].scatter(pred_teste, residuos_treino, s=8, alpha=0.4)
+eixo[1].axhline(0, color="r", linestyle="--")
+eixo[1].set_xlabel("PE previsto (MW)")
+eixo[1].set_ylabel("Resíduos = PE real - PE previsto (MW)")
+eixo[1].set_title("Resíduos vs Previsão - Teste")
+
+eixo[2].hist(residuos_treino, bins=40, edgecolor="black")
+eixo[2].set_xlabel("Resíduos = PE real - PE previsto (MW)")
+eixo[2].set_ylabel("Frequência")
+eixo[2].set_title("Distribuição dos resíduos - Teste")
+
+fig.tight_layout()
+fig.savefig(PASTA / "fig2_diagnostico.png", dpi=150)
+
+print(f"\nGráficos de diagnóstico salvos em: {PASTA / 'fig2_diagnostico.png'}")
+plt.show()
