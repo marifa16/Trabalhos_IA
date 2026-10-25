@@ -1,223 +1,275 @@
-import sys 
-from pathlib import Path 
+from pathlib import Path
+import sys
 
-import numpy as np 
-import pandas as pd 
-import matplotlib.pyplot as plt 
-
-from sklearn.model_selection import train_test_split, cross_val_score
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-from sklearn.pipeline import make_pipeline 
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 
-PASTA = Path(__file__).resolve().parent / "usina.csv"
-Arquivo = Path(sys.argv[1])if len(sys.argv) > 1 else PASTA / "Folds5x2_pp.xlsx"
+BASE_DIR = Path(__file__).resolve().parent
+WORKSPACE_DIR = BASE_DIR.parent
 
-VARIAVEIS_X = ["AT", "V", "AP", "RH"] #variáveis independentes
-VARIAVEIS_Y = "PE" #variável dependente 
-SEMENTE = 42 #o valor do sorteio treino seja sempre o mesmo, para os resultados serem reproduzíveis
+VARIAVEIS_X = ["AT", "V", "AP", "RH"]
+VARIAVEL_Y = "PE"
+SEMENTE = 42
 
-def titulo(texto):
-    print("\n" + "=" * 80) 
+
+def titulo(texto: str) -> None:
+    print("\n" + "=" * 80)
     print(texto)
     print("=" * 80 + "\n")
 
 
-titulo("Carregando os dados...")
+def localizar_arquivo_entrada() -> Path:
+    if len(sys.argv) > 1:
+        caminho = Path(sys.argv[1]).expanduser()
+        if not caminho.is_absolute():
+            caminho = (Path.cwd() / caminho).resolve()
+        return caminho
 
-if Arquivo.suffix.lower() in (".xls", ".xlsx"): #lê arquivos do Excel, que podem ter várias planilhas
-    df = pd.read_excel(Arquivo, sheet_name=0) # lê a primeira planilha
-else:
-    df = pd.read_csv(Arquivo) # lê arquivos CSV
+    candidatos = [
+        BASE_DIR / "Folds5x2_pp.xlsx",
+        BASE_DIR / "usina.csv",
+        WORKSPACE_DIR / "Folds5x2_pp.xlsx",
+        WORKSPACE_DIR / "usina.csv",
+    ]
+    for candidato in candidatos:
+        if candidato.exists():
+            return candidato
 
-
-print(f"Arquivo carregado: {Arquivo}")
-print(f"Formato do arquivo: {df.shape}")
-print("\nPrimeiras linhas do arquivo:")
-print(df.head())
-print("\nResumo estatístico das variáveis:")
-print(df.describe().round(2))
-
-#Checado se há volores ausentes
-
-ausentes = df.isnull().sum()
-print(ausentes)
-print(f"\nNúmero de valores ausentes: {ausentes.sum()}")
-if ausentes.sum() == 0:
-    print("Não há valores ausentes!")
-
-
-#Correlação entre as variáveis 
-
-correlacao = df[VARIAVEIS_X + [VARIAVEIS_Y]].corr()[VARIAVEIS_Y].drop(VARIAVEIS_Y) #correlação entre as variáveis independentes e a variável dependente
-correlacao = correlacao.sort_values(key=abs, ascending=False) #ordena pela correlação absoluta
-print(correlacao.round(4))
-
-mais_influente = correlacao.index[0] #variável mais influente na variável dependente
-print(f"\n -> A variável com maior correlação com a variável dependente ({VARIAVEIS_Y})" f"(r = {correlacao.iloc[0]:.3f})")
+    caminhos = "\n - ".join(str(c) for c in candidatos)
+    raise FileNotFoundError(
+        "Nenhum dataset encontrado automaticamente.\n"
+        "Informe o arquivo como argumento, por exemplo:\n"
+        '  ".venv/bin/python" Problema_1/Regressao_Linear_Usina.py Problema_1/Folds5x2_pp.xlsx\n'
+        f"Locais verificados:\n - {caminhos}"
+    )
 
 
-#Correlação entre as variáveis independentes 
+def carregar_dados(arquivo: Path) -> pd.DataFrame:
+    if not arquivo.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {arquivo}")
 
-correlacao_ind = df[VARIAVEIS_X].corr() #correlação entre as variáveis independentes
-print(correlacao_ind.round(3))
+    if arquivo.suffix.lower() in (".xls", ".xlsx"):
+        return pd.read_excel(arquivo, sheet_name=0)
+    if arquivo.suffix.lower() == ".csv":
+        return pd.read_csv(arquivo)
+    raise ValueError("Formato inválido. Use .csv, .xls ou .xlsx")
 
 
-print("\nPares com correlação maior que 0.7:") 
-achou = False
-for i,a in enumerate(VARIAVEIS_X): #compara cada variável com as demais, sem repetir pares
-    for b in VARIAVEIS_X[i+1:]:
-        if abs(correlacao_ind.loc[a,b]) > 0.7:
-            print(f" -> {a} e {b}: {correlacao_ind.loc[a,b]:.3f}")
-            achou = True
-            if not achou:
-                print("Nenhum par de variáveis independentes")
+def calcular_vif(df_x: pd.DataFrame) -> dict[str, float]:
+    resultado = {}
+    for var in df_x.columns:
+        outras = [c for c in df_x.columns if c != var]
+        modelo_aux = LinearRegression()
+        modelo_aux.fit(df_x[outras], df_x[var])
+        r2_aux = modelo_aux.score(df_x[outras], df_x[var])
+        if r2_aux >= 0.999999:
+            resultado[var] = float("inf")
+        else:
+            resultado[var] = 1.0 / (1.0 - r2_aux)
+    return resultado
 
-print("\nVIF para cada variável independente:")
-for var in VARIAVEIS_X:
-    outras_var = [v for v in VARIAVEIS_X if v != var] #variáveis independentes, exceto a variável atual
-    modelo = LinearRegression()
-    r2 = modelo.score(df[outras_var], df[var]) #R² da regressão da variável atual em função das demais
-    vif = 1 / (1 - r2)
-    print(f" -> {var}: VIF = {vif:.2f}")
-    
-#Mapa de calor da correlação completo
 
-correlacao_total = df[VARIAVEIS_X + [VARIAVEIS_Y]].corr()
-fig, ax = plt.subplots(figsize=(6, 5))
-im = ax.imshow(correlacao_total, cmap="coolwarm", vmin=-1, vmax=1) 
-nomes = correlacao_total.columns
-ax.set_xticks(range(len(nomes)))
-ax.set_yticks(range(len(nomes)))
-ax.set_xticklabels(nomes)
-ax.set_yticklabels(nomes)
-
-#Adiciona os valores da correlação no mapa de calor
-
-for i in range(len(nomes)):
-    for j in range(len(nomes)):
-        ax.text(j, i, f"{correlacao_total.iloc[i, j]:.2f}", ha="center", va="center", fontsize=9)
-
-fig.colorbar(im,ax=ax)
-ax.set_title("Mapa de calor da correlação")
-fig.tight_layout()
-fig.savefig(PASTA / "correlacao_total.png", dpi=300)
-
-#Divisão dos dados em treino/teste (80%/20%)
-
-X = df[VARIAVEIS_X]
-Y = df[VARIAVEIS_Y]
-       
-X_treino, X_teste, Y_treino, Y_teste = train_test_split(X, Y, test_size=0.2, random_state=SEMENTE)
-
-print(f"\nTreino: {X_treino.shape[0]} amostras, Teste: {X_teste.shape[0]} amostras")
-
-#Pré-pocessamento: valores ausentes e padronização das variáveis
-
-imputer = SimpleImputer(strategy="median") #substitui valores ausentes pela média da variável
-X_treino = imputer.fit_transform(X_treino) #aprende a média e substitui os valores ausentes no conjunto
-X_teste = imputer.transform(X_teste) #aplica a média aprendida 
-
-scaler = StandardScaler() #padroniza as variáveis para média 0 e desvio padrão 1
-X_treino = scaler.fit_transform(X_treino) #aplica a padronização no conjunto
-X_teste = scaler.transform(X_teste) #aplica a padronização aprendida
-
-#Média das variáveis no treino antes da padronização
-
-for nome, m, s in zip(VARIAVEIS_X, scaler.mean_,scaler.scale_):
-    print(f" -> {nome}: média = {m:.2f} | desvio padrão -> {s:.2f}")
-print("\nMédia das variáveis após a padronização -> 0 | desvio padrão -> 1")
-print(f" -> média:", np.round(X_treino.mean(axis=0), 4))
-print(f" -> desvio padrão: ", np.round(X_treino.std(axis=0), 4))
-
-#Treinamento do modelo de regressão linear
-
-modelo = LinearRegression()
-modelo.fit(X_treino, Y_treino) #treina o modelo com os dados
-
-#Coeficientes váriaveis padronizadas que comparam entre si
-
-print(f" intercepto: {modelo.intercept_:.4f}")
-for nome, coef in zip(VARIAVEIS_X, modelo.coef_):
-    print(f" -> {nome}:{coef:+.4f}(MW por desvio padrão da variável)")
-    
-#Convertendo as unidaddes
-
-coeficiente_originais = modelo.coef_ / scaler.scale_ 
-intercepto_original = modelo.intercept_ - np.sum(modelo.coef_ * scaler.mean_ / scaler.scale_)
-
-print(f"\nCoeficientes Originai: ")
-print(f" intercepto: {intercepto_original:.4f}")
-for nome, coef in zip(VARIAVEIS_X, coeficiente_originais):
-    print(f" -> {nome}:{coef:+.4f} (MW por unidade da variável)")
-    
-eq = f"PE = {intercepto_original:.2f}"
-for nome, coef in zip(VARIAVEIS_X, coeficiente_originais):
-    eq += f" {'+' if coef >= 0 else '-'}{abs(coef):.4f}*{nome}"
-print(f"\nEquação da regressão linear: {eq}")
-
-#Avaliar o desempenho do modelo
-
-def metricas(y_true, y_pred):
+def metricas(y_true: pd.Series, y_pred: np.ndarray) -> tuple[float, float, float]:
     r2 = r2_score(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     mae = mean_absolute_error(y_true, y_pred)
-    return r2, rmse, mae 
+    return r2, rmse, mae
 
-pred_treino = modelo.predict(X_treino)
-pred_teste = modelo.predict(X_teste)
 
-r2_treino, nrmse_treino, mae_treino = metricas(Y_treino, pred_treino)
-r2_teste, nrmse_teste, mae_teste = metricas(Y_teste, pred_teste)
+def main() -> None:
+    titulo("Carregando os dados")
+    arquivo = localizar_arquivo_entrada()
+    df = carregar_dados(arquivo)
 
-print(f"{'Conjunto':<10}{'R²':>10}{'NRMSE':>14}{'MAE':>12}")
-print(f"{'Treino':<10}{r2_treino:>10.4f}{nrmse_treino:>14.4f}{mae_treino:>14.3f}")
-print(f"{'Teste':<10}{r2_teste:>10.4f}{nrmse_teste:>14.4f}{mae_teste:>14.3f}")
+    colunas_necessarias = set(VARIAVEIS_X + [VARIAVEL_Y])
+    faltantes = colunas_necessarias.difference(df.columns)
+    if faltantes:
+        raise ValueError(
+            "Colunas obrigatórias ausentes no dataset: "
+            + ", ".join(sorted(faltantes))
+        )
 
-amplitude = Y.max() - Y.min()
-print(f"\nPE varia de {Y.min():.1f} a {Y.max():.1f}MW" f"(amplitude = {amplitude:.1f}MW; desvio padrão = {Y.std():.2f}MW)")
-print(f" NRMSE no teste = {100*nrmse_teste/amplitude:.2f}% da amplitude")
-print(f" MAE no teste = {100*mae_teste/amplitude:.2f}% da amplitude")
-print(f" MAE no teste = {100*mae_teste/amplitude:.2f}% da media de PE")
+    print(f"Arquivo carregado: {arquivo}")
+    print(f"Formato do arquivo: {df.shape}")
+    print("\nPrimeiras linhas:")
+    print(df.head())
+    print("\nResumo estatístico:")
+    print(df[VARIAVEIS_X + [VARIAVEL_Y]].describe().round(2))
 
-pipe = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), LinearRegression())
-r2_cv = cross_val_score(pipe, X, Y, cv=5, scoring="r2")
-print(f"\nValidação cruzada - R²: " f"{r2_cv.mean():.4f}+-{r2_cv.std():.4f}")
+    titulo("Pré-processamento (ausentes)")
+    ausentes = df[VARIAVEIS_X + [VARIAVEL_Y]].isnull().sum()
+    print(ausentes)
+    print(f"\nTotal de valores ausentes: {int(ausentes.sum())}")
+    if int(ausentes.sum()) == 0:
+        print("Não há valores ausentes.")
 
-#Diagnostico de sobreajuste 
+    titulo("1) Correlação entre variáveis de entrada e PE")
+    corr_y = (
+        df[VARIAVEIS_X + [VARIAVEL_Y]]
+        .corr()[VARIAVEL_Y]
+        .drop(VARIAVEL_Y)
+        .sort_values(key=np.abs, ascending=False)
+    )
+    print(corr_y.round(4))
+    mais_influente = corr_y.index[0]
+    print(
+        f"\nMaior influência linear: {mais_influente} "
+        f"(r = {corr_y.iloc[0]:.3f})"
+    )
 
-print(f"\nDiferença de R²: {r2_treino - r2_teste:+4f}" f" -> {'sem sinal de overfitting' if abs(r2_treino - r2_teste)<0.02 else 'possível overfitting'}")
+    titulo("2) Correlação entre variáveis independentes")
+    corr_x = df[VARIAVEIS_X].corr()
+    print(corr_x.round(3))
 
-#Gráfico de diagnóstico do modelo
+    print("\nPares com |correlação| > 0.70:")
+    achou = False
+    for i, a in enumerate(VARIAVEIS_X):
+        for b in VARIAVEIS_X[i + 1 :]:
+            valor = corr_x.loc[a, b]
+            if abs(valor) > 0.70:
+                print(f" - {a} e {b}: {valor:.3f}")
+                achou = True
+    if not achou:
+        print(" - Nenhum par com correlação forte.")
 
-residuos_treino = Y_treino - pred_treino 
+    print("\nVIF por variável:")
+    vif = calcular_vif(df[VARIAVEIS_X])
+    for var in VARIAVEIS_X:
+        valor = vif[var]
+        texto = "infinito" if np.isinf(valor) else f"{valor:.2f}"
+        print(f" - {var}: VIF = {texto}")
 
-fig, eixo = plt.subplots(1, 3, figsize=(16, 4.5))
+    corr_total = df[VARIAVEIS_X + [VARIAVEL_Y]].corr()
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(corr_total, cmap="coolwarm", vmin=-1, vmax=1)
+    nomes = corr_total.columns
+    ax.set_xticks(range(len(nomes)))
+    ax.set_yticks(range(len(nomes)))
+    ax.set_xticklabels(nomes)
+    ax.set_yticklabels(nomes)
+    for i in range(len(nomes)):
+        for j in range(len(nomes)):
+            ax.text(
+                j,
+                i,
+                f"{corr_total.iloc[i, j]:.2f}",
+                ha="center",
+                va="center",
+                fontsize=9,
+            )
+    fig.colorbar(im, ax=ax)
+    ax.set_title("Mapa de calor da correlação")
+    fig.tight_layout()
+    arquivo_corr = BASE_DIR / "correlacao_total.png"
+    fig.savefig(arquivo_corr, dpi=300)
+    plt.close(fig)
+    print(f"\nMapa de calor salvo em: {arquivo_corr}")
 
-eixo[0].scatter(Y_teste, pred_teste, s=8, alpha=0.4) 
-limite = [Y.min(),Y.max()]
-eixo[0].plot(limite, limite, "r--", label="Previsão perfeita!")
-eixo[0].set_xlabel("PE real (MW)")
-eixo[0].set_ylabel("PE previsto (MW)")
-eixo[0].set_title("Previsão vs Real - Teste -> R² = {r2_teste:.3f}")
-eixo[0].legend()
+    titulo("3) Regressão linear múltipla (80/20)")
+    x = df[VARIAVEIS_X]
+    y = df[VARIAVEL_Y]
+    x_treino, x_teste, y_treino, y_teste = train_test_split(
+        x, y, test_size=0.2, random_state=SEMENTE
+    )
+    print(f"Treino: {x_treino.shape[0]} amostras | Teste: {x_teste.shape[0]} amostras")
 
-eixo[1].scatter(pred_teste, residuos_treino, s=8, alpha=0.4)
-eixo[1].axhline(0, color="r", linestyle="--")
-eixo[1].set_xlabel("PE previsto (MW)")
-eixo[1].set_ylabel("Resíduos = PE real - PE previsto (MW)")
-eixo[1].set_title("Resíduos vs Previsão - Teste")
+    imputer = SimpleImputer(strategy="median")
+    scaler = StandardScaler()
+    modelo = LinearRegression()
 
-eixo[2].hist(residuos_treino, bins=40, edgecolor="black")
-eixo[2].set_xlabel("Resíduos = PE real - PE previsto (MW)")
-eixo[2].set_ylabel("Frequência")
-eixo[2].set_title("Distribuição dos resíduos - Teste")
+    x_treino_imp = imputer.fit_transform(x_treino)
+    x_teste_imp = imputer.transform(x_teste)
+    x_treino_std = scaler.fit_transform(x_treino_imp)
+    x_teste_std = scaler.transform(x_teste_imp)
 
-fig.tight_layout()
-fig.savefig(PASTA / "fig2_diagnostico.png", dpi=150)
+    print("\nEstatísticas de padronização (treino):")
+    for nome, media, desvio in zip(VARIAVEIS_X, scaler.mean_, scaler.scale_):
+        print(f" - {nome}: média={media:.2f} | desvio={desvio:.2f}")
 
-print(f"\nGráficos de diagnóstico salvos em: {PASTA / 'fig2_diagnostico.png'}")
-plt.show()
+    modelo.fit(x_treino_std, y_treino)
+
+    print("\nCoeficientes padronizados:")
+    print(f" intercepto: {modelo.intercept_:.4f}")
+    for nome, coef in zip(VARIAVEIS_X, modelo.coef_):
+        print(f" - {nome}: {coef:+.4f} MW por 1 desvio padrão")
+
+    coef_orig = modelo.coef_ / scaler.scale_
+    intercepto_orig = modelo.intercept_ - np.sum(modelo.coef_ * scaler.mean_ / scaler.scale_)
+    print("\nCoeficientes na unidade original:")
+    print(f" intercepto: {intercepto_orig:.4f}")
+    for nome, coef in zip(VARIAVEIS_X, coef_orig):
+        print(f" - {nome}: {coef:+.4f} MW por unidade")
+
+    eq = f"PE = {intercepto_orig:.2f}"
+    for nome, coef in zip(VARIAVEIS_X, coef_orig):
+        sinal = "+" if coef >= 0 else "-"
+        eq += f" {sinal} {abs(coef):.4f}*{nome}"
+    print(f"\nEquação estimada: {eq}")
+
+    titulo("4) Avaliação do modelo")
+    pred_treino = modelo.predict(x_treino_std)
+    pred_teste = modelo.predict(x_teste_std)
+    r2_treino, rmse_treino, mae_treino = metricas(y_treino, pred_treino)
+    r2_teste, rmse_teste, mae_teste = metricas(y_teste, pred_teste)
+
+    print(f"{'Conjunto':<10}{'R²':>10}{'RMSE':>14}{'MAE':>12}")
+    print(f"{'Treino':<10}{r2_treino:>10.4f}{rmse_treino:>14.4f}{mae_treino:>12.4f}")
+    print(f"{'Teste':<10}{r2_teste:>10.4f}{rmse_teste:>14.4f}{mae_teste:>12.4f}")
+
+    amplitude = y.max() - y.min()
+    media_y = y.mean()
+    print(
+        f"\nPE varia de {y.min():.1f} a {y.max():.1f} MW "
+        f"(amplitude = {amplitude:.1f} MW; média = {media_y:.2f} MW)"
+    )
+    print(f"RMSE no teste = {100 * rmse_teste / amplitude:.2f}% da amplitude")
+    print(f"MAE no teste = {100 * mae_teste / amplitude:.2f}% da amplitude")
+    print(f"MAE no teste = {100 * mae_teste / media_y:.2f}% da média de PE")
+
+    pipe = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), LinearRegression())
+    r2_cv = cross_val_score(pipe, x, y, cv=5, scoring="r2")
+    print(f"\nValidação cruzada (5-fold) - R²: {r2_cv.mean():.4f} +/- {r2_cv.std():.4f}")
+
+    diferenca_r2 = r2_treino - r2_teste
+    status = "sem sinal forte de overfitting" if abs(diferenca_r2) < 0.02 else "possível overfitting"
+    print(f"Diferença de R² treino-teste: {diferenca_r2:+.4f} -> {status}")
+
+    residuos_teste = y_teste - pred_teste
+    fig, eixo = plt.subplots(1, 3, figsize=(16, 4.5))
+
+    eixo[0].scatter(y_teste, pred_teste, s=8, alpha=0.4)
+    limite = [y.min(), y.max()]
+    eixo[0].plot(limite, limite, "r--", label="previsão perfeita")
+    eixo[0].set_xlabel("PE real (MW)")
+    eixo[0].set_ylabel("PE previsto (MW)")
+    eixo[0].set_title(f"Previsão vs Real (Teste) - R²={r2_teste:.3f}")
+    eixo[0].legend()
+
+    eixo[1].scatter(pred_teste, residuos_teste, s=8, alpha=0.4)
+    eixo[1].axhline(0, color="r", linestyle="--")
+    eixo[1].set_xlabel("PE previsto (MW)")
+    eixo[1].set_ylabel("Resíduo (MW)")
+    eixo[1].set_title("Resíduo vs Previsão (Teste)")
+
+    eixo[2].hist(residuos_teste, bins=40, edgecolor="black")
+    eixo[2].set_xlabel("Resíduo (MW)")
+    eixo[2].set_ylabel("Frequência")
+    eixo[2].set_title("Distribuição dos resíduos (Teste)")
+
+    fig.tight_layout()
+    arquivo_diag = BASE_DIR / "fig2_diagnostico.png"
+    fig.savefig(arquivo_diag, dpi=150)
+    plt.close(fig)
+    print(f"Gráficos de diagnóstico salvos em: {arquivo_diag}")
+
+
+if __name__ == "__main__":
+    main()
